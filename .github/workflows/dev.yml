@@ -1,0 +1,125 @@
+name: ECR Image Build & Push
+on:
+  push:
+    branches:
+      - dev
+
+env:
+  PROJECT_NAME: wecoop
+
+jobs:
+  CI:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Create Repository
+        continue-on-error: true
+        run: |
+          aws ecr create-repository --region ap-northeast-2 --repository-name ${{ env.PROJECT_NAME }}-web-nginx
+          aws ecr create-repository --region ap-northeast-2 --repository-name ${{ env.PROJECT_NAME }}-websocket-nginx
+          aws ecr create-repository --region ap-northeast-2 --repository-name ${{ env.PROJECT_NAME }}-backend
+
+      - name: Build & Push image(web-nginx)
+        if: ${{ contains(github.event.head_commit.message, '[nginx]')}}
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.PROJECT_NAME }}-web-nginx
+          COMMIT_TAG: ${{ github.sha }}
+        run: |
+          pushd nginx
+          mv nginx.web.conf nginx.conf
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:latest $ECR_REGISTRY/$ECR_REPOSITORY:$COMMIT_TAG
+          docker push -a $ECR_REGISTRY/$ECR_REPOSITORY
+          popd
+
+      - name: Build & Push image(websocket-nginx)
+        if: ${{ contains(github.event.head_commit.message, '[nginx]')}}
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.PROJECT_NAME }}-websocket-nginx
+          COMMIT_TAG: ${{ github.sha }}
+        run: |
+          pushd nginx
+          mv nginx.websocket.conf nginx.conf
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:latest $ECR_REGISTRY/$ECR_REPOSITORY:$COMMIT_TAG
+          docker push -a $ECR_REGISTRY/$ECR_REPOSITORY
+          popd
+
+      - name: Build & Push image(backend)
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.PROJECT_NAME }}-backend
+          COMMIT_TAG: ${{ github.sha }}
+        run: |
+          pushd backend
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:latest $ECR_REGISTRY/$ECR_REPOSITORY:$COMMIT_TAG
+          docker push -a $ECR_REGISTRY/$ECR_REPOSITORY
+          popd
+
+      # WEB
+      - name: Download TaskDefinition(WEB)
+        id: tf-web
+        continue-on-error: true
+        run: aws ecs describe-task-definition --task-definition ${{ env.PROJECT_NAME }}-web-family --query taskDefinition > web.tf.json
+      - name: Deploy Service(WEB)
+        if: steps.tf-web.outcome == 'success'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: web.tf.json
+          cluster: ${{ env.PROJECT_NAME }}-cluster
+          service: web
+
+      # WEBSOCKET
+      - name: Download TaskDefinition(WEBSOCKET)
+        id: tf-websocket
+        continue-on-error: true
+        run: aws ecs describe-task-definition --task-definition ${{ env.PROJECT_NAME }}-websocket-family --query taskDefinition > websocket.tf.json
+      - name: Deploy Service(WEBSOCKET)
+        if: steps.tf-websocket.outcome == 'success'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: websocket.tf.json
+          cluster: ${{ env.PROJECT_NAME }}-cluster
+          service: websocket
+
+      # CELERY
+      - name: Download TaskDefinition(CELERY)
+        id: tf-celery
+        continue-on-error: true
+        run: aws ecs describe-task-definition --task-definition ${{ env.PROJECT_NAME }}-celery-family --query taskDefinition > celery.tf.json
+      - name: Deploy Service(CELERY)
+        if: steps.tf-celery.outcome == 'success'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: celery.tf.json
+          cluster: ${{ env.PROJECT_NAME }}-cluster
+          service: celery
+
+      # CELERYBEAT
+      - name: Download TaskDefinition(CELERYBEAT)
+        id: tf-celerybeat
+        continue-on-error: true
+        run: aws ecs describe-task-definition --task-definition ${{ env.PROJECT_NAME }}-celerybeat-family --query taskDefinition > celerybeat.tf.json
+      - name: Deploy Service(CELERYBEAT)
+        if: steps.tf-celerybeat.outcome == 'success'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: celerybeat.tf.json
+          cluster: ${{ env.PROJECT_NAME }}-cluster
+          service: celerybeat

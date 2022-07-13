@@ -1,0 +1,731 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description:
+  'ECS IaC'
+
+Parameters:
+  AdditionalService:
+    Type: String
+    Description: >
+      0: nothing
+      1: websocket
+      2: celery
+      3: celerybeat(require celery)
+    AllowedValues:
+      - '0'
+      - '1'
+      - '1/2'
+      - '2'
+      - '2/3'
+      - '1/2/3'
+
+Conditions:
+  IsWebsocket: !Or
+    - !Equals [!Ref AdditionalService, '1']
+    - !Equals [!Ref AdditionalService, '1/2']
+    - !Equals [!Ref AdditionalService, '1/2/3']
+  IsCelery: !Or
+    - !Equals [!Ref AdditionalService, '2']
+    - !Equals [!Ref AdditionalService, '1/2']
+    - !Equals [!Ref AdditionalService, '2/3']
+    - !Equals [!Ref AdditionalService, '1/2/3']
+    - !Condition IsCelerybeat
+  IsCelerybeat: !Or
+    - !Equals [!Ref AdditionalService, '2/3']
+    - !Equals [!Ref AdditionalService, '1/2/3']
+  IsRedis: !Or
+    - !Condition IsWebsocket
+    - !Condition IsCelery
+    - !Condition IsCelerybeat
+
+
+Resources:
+  # VPC
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+  PublicSubnetAz1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, Fn::GetAZs: !Ref 'AWS::Region']
+      MapPublicIpOnLaunch: true
+  PublicSubnetAz2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [1, Fn::GetAZs: !Ref 'AWS::Region']
+      MapPublicIpOnLaunch: true
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+  AttachGateway:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  RouteViaIgw:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+  PublicRouteViaIgw:
+    Type: 'AWS::EC2::Route'
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteViaIgw
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnet1RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnetAz1
+      RouteTableId: !Ref RouteViaIgw
+  PublicSubnet2RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnetAz2
+      RouteTableId: !Ref RouteViaIgw
+
+  # ECS Cluster
+  Cluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-cluster'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+  SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: !Sub '${AWS::StackName}-cluster-sg'
+      VpcId: !Ref VPC
+  SecurityGroupInboundSSH:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+  SecurityGroupInboundHTTP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+  SecurityGroupInboundHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+  SecurityGroupInboundALB:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 31000
+      ToPort: 61000
+      SourceSecurityGroupId: !Ref SecurityGroup
+  SecurityGroupInboundRedis:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort: 6379
+      SourceSecurityGroupId: !Ref SecurityGroup
+  ContainerInstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: ecs-instance
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeTags'
+                  - 'ecs:CreateCluster'
+                  - 'ecs:DeregisterContainerInstance'
+                  - 'ecs:DiscoverPollEndpoint'
+                  - 'ecs:Poll'
+                  - 'ecs:RegisterContainerInstance'
+                  - 'ecs:StartTelemetrySession'
+                  - 'ecs:UpdateContainerInstancesState'
+                  - 'ecs:Submit*'
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+  ContainerInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ContainerInstanceRole
+  ContainerInstanceLC:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      ImageId: ami-00ad714e0f1a26a32
+      InstanceType: t3.small
+      SecurityGroups: [!Ref SecurityGroup]
+      IamInstanceProfile: !Ref ContainerInstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvdcz
+          Ebs:
+            VolumeSize: 22
+            VolumeType: gp2
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          echo ECS_CLUSTER=${Cluster} >> /etc/ecs/ecs.config
+  ContainerInstanceASG:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    DependsOn: Cluster
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnetAz1
+        - !Ref PublicSubnetAz2
+      LaunchConfigurationName: !Ref ContainerInstanceLC
+      MinSize: 1
+      MaxSize: 10
+  CapacityProvider:
+    Type: 'AWS::ECS::CapacityProvider'
+    DependsOn: Cluster
+    DeletionPolicy: Delete
+    Properties:
+      Name: !Sub '${AWS::StackName}-cluster-cp'
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref ContainerInstanceASG
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 100
+        ManagedTerminationProtection: DISABLED
+  ClusterCapacityProviderAssociation:
+    Type: 'AWS::ECS::ClusterCapacityProviderAssociations'
+    DeletionPolicy: Delete
+    Properties:
+      Cluster: !Ref Cluster
+      CapacityProviders:
+        - !Ref CapacityProvider
+      DefaultCapacityProviderStrategy:
+        - Base: 0
+          Weight: 1
+          CapacityProvider: !Ref CapacityProvider
+
+  # ECS Service
+  ServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+                  - 'elasticloadbalancing:DeregisterTargets'
+                  - 'elasticloadbalancing:Describe*'
+                  - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+                  - 'elasticloadbalancing:RegisterTargets'
+                  - 'ec2:Describe*'
+                  - 'ec2:AuthorizeSecurityGroupIngress'
+                Resource: '*'
+  ServiceAutoscalingRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [application-autoscaling.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: service-autoscaling
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'application-autoscaling:*'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                  - 'ecs:DescribeServices'
+                  - 'ecs:UpdateService'
+                Resource: '*'
+  ALB:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Name: !Sub '${AWS::StackName}-alb'
+      Type: application
+      IpAddressType: ipv4
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnetAz1
+        - !Ref PublicSubnetAz2
+      SecurityGroups: [!Ref SecurityGroup]
+  ALBTargetGroup8080:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    DependsOn: ALB
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Name: !Sub '${AWS::StackName}-tg-8080'
+      Port: 8080
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPC
+  ALBTargetGroup8081:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Condition: IsWebsocket
+    DependsOn: ALB
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Name: !Sub '${AWS::StackName}-tg-8081'
+      Port: 8081
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPC
+  ALBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    DependsOn: ServiceRole
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup8080
+  ALBListenerRule:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    DependsOn: ALBListener
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !If [IsWebsocket, !Ref ALBTargetGroup8081, !Ref ALBTargetGroup8080]
+      Conditions:
+        - Field: path-pattern
+          Values: !If [IsWebsocket, [/ws/*], [/]]
+      ListenerArn: !Ref ALBListener
+      Priority: 1
+  TaskDefinitionLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/ecs/${AWS::StackName}'
+      RetentionInDays: 14
+  PrivateDnsNamespace:
+    Type: 'AWS::ServiceDiscovery::PrivateDnsNamespace'
+    Properties:
+      Name: !Sub '${AWS::StackName}.ecs'
+      Vpc: !Ref VPC
+
+  TaskRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ ecs-tasks.amazonaws.com ]
+            Action: [ 'sts:AssumeRole' ]
+      Path: /
+      Policies:
+        - PolicyName: ecs-task
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:GetRepositoryPolicy'
+                  - 'ecr:DescribeRepositories'
+                  - 'ecr:ListImages'
+                  - 'ecr:DescribeImages'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:GetLifecyclePolicy'
+                  - 'ecr:GetLifecyclePolicyPreview'
+                  - 'ecr:ListTagsForResource'
+                  - 'ecr:DescribeImageScanFindings'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'xray:*'
+                  - 's3:*'
+                  - 'secretsmanager:GetResourcePolicy'
+                  - 'secretsmanager:GetSecretValue'
+                  - 'secretsmanager:DescribeSecret'
+                  - 'secretsmanager:ListSecretVersionIds'
+                  - 'secretsmanager:ListSecrets'
+                Resource: '*'
+  # Redis
+  ServiceRegistryRedis:
+    Type: 'AWS::ServiceDiscovery::Service'
+    Properties:
+      Name: redis
+      NamespaceId: !Ref PrivateDnsNamespace
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords:
+          - Type: A
+            TTL: 60
+          - Type: SRV
+            TTL: 60
+  TaskDefinitionRedis:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      Family: !Sub '${AWS::StackName}-redis-family'
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Cpu: 512
+      Memory: 512
+      NetworkMode: awsvpc
+      ContainerDefinitions:
+        - Name: redis
+          Image: redis:6
+          Essential: true
+          PortMappings:
+            - ContainerPort: 6379
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TaskDefinitionLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: /ecs
+  ServiceRedis:
+    Type: 'AWS::ECS::Service'
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: redis
+      SchedulingStrategy: REPLICA
+      DesiredCount: 1
+      LaunchType: EC2
+      TaskDefinition: !Ref TaskDefinitionRedis
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref SecurityGroup
+          Subnets:
+            - !Ref PublicSubnetAz1
+            - !Ref PublicSubnetAz2
+      ServiceRegistries:
+        - RegistryArn: !GetAtt ServiceRegistryRedis.Arn
+          Port: 6379
+  # Web
+  TaskDefinitionWeb:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      Family: !Sub '${AWS::StackName}-web-family'
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Cpu: 512
+      Memory: 512
+      Volumes:
+        - Name: static
+      ContainerDefinitions:
+        - Name: web-nginx
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AWS::StackName}-web-nginx:latest'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+          Links:
+            - web-app
+          DependsOn:
+            - ContainerName: web-app
+              Condition: START
+          MountPoints:
+            - SourceVolume: static
+              ContainerPath: /static
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TaskDefinitionLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: /ecs
+        - Name: web-app
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AWS::StackName}-backend:latest'
+          Essential: true
+          Environment:
+            - Name: DJANGO_SETTINGS_MODULE
+              Value: config.settings.prod
+            - Name: REDIS_HOST
+              Value: !Join ['.', [!GetAtt ServiceRegistryRedis.Name, !Ref AWS::StackName, ecs]]
+          EntryPoint: [sh, -c]
+          Command:
+            - /bin/bash -c "gunicorn --bind 0.0.0.0:8000 --workers=2 --thread=2 config.wsgi:application"
+          MountPoints:
+            - SourceVolume: static
+              ContainerPath: /backend/static
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TaskDefinitionLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: /ecs
+  ServiceWeb:
+    Type: 'AWS::ECS::Service'
+    DependsOn: ALBListenerRule
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: web
+      TaskDefinition: !Ref TaskDefinitionWeb
+      SchedulingStrategy: REPLICA
+      DesiredCount: 1
+      Role: !Ref ServiceRole
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref CapacityProvider
+          Base: 1
+          Weight: 1
+      LoadBalancers:
+        - ContainerName: web-nginx
+          ContainerPort: 8080
+          TargetGroupArn: !Ref ALBTargetGroup8080
+      PlacementStrategies:
+        - Type: binpack
+          Field: memory
+  ServiceScalingTargetWeb:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    DependsOn: ServiceWeb
+    Properties:
+      MinCapacity: 1
+      MaxCapacity: 10
+      ResourceId: !Join ['/', [service, !Ref Cluster, !GetAtt ServiceWeb.Name]]
+      RoleARN: !GetAtt ServiceAutoscalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  ServiceScalingPolicyWeb:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-asg-policy-web'
+      ScalingTargetId: !Ref ServiceScalingTargetWeb
+      PolicyType: TargetTrackingScaling
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 80
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 120
+  # Websocket
+  TaskDefinitionWebsocket:
+    Type: 'AWS::ECS::TaskDefinition'
+    Condition: IsWebsocket
+    Properties:
+      Family: !Sub '${AWS::StackName}-websocket-family'
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Cpu: 512
+      Memory: 512
+      ContainerDefinitions:
+        - Name: websocket-nginx
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AWS::StackName}-websocket-nginx:latest'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8081
+          Links:
+            - websocket-app
+          DependsOn:
+            - ContainerName: websocket-app
+              Condition: START
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TaskDefinitionLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: /ecs
+        - Name: websocket-app
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AWS::StackName}-backend:latest'
+          Essential: true
+          Environment:
+            - Name: DJANGO_SETTINGS_MODULE
+              Value: config.settings.prod
+            - Name: REDIS_HOST
+              Value: !Join ['.', [!GetAtt ServiceRegistryRedis.Name, !Ref AWS::StackName, ecs]]
+          EntryPoint: [sh, -c]
+          Command:
+            - /bin/bash -c "daphne -b 0.0.0.0 -p 5000 config.asgi:application"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TaskDefinitionLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: /ecs
+  ServiceWebsocket:
+    Type: 'AWS::ECS::Service'
+    Condition: IsWebsocket
+    DependsOn: ALBListenerRule
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: websocket
+      TaskDefinition: !Ref TaskDefinitionWebsocket
+      SchedulingStrategy: REPLICA
+      DesiredCount: 1
+      Role: !Ref ServiceRole
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref CapacityProvider
+          Base: 1
+          Weight: 1
+      LoadBalancers:
+        - ContainerName: websocket-nginx
+          ContainerPort: 8081
+          TargetGroupArn: !Ref ALBTargetGroup8081
+      PlacementStrategies:
+        - Type: binpack
+          Field: memory
+  ServiceScalingTargetWebsocket:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    Condition: IsWebsocket
+    DependsOn: ServiceWebsocket
+    Properties:
+      MinCapacity: 1
+      MaxCapacity: 10
+      ResourceId: !Join ['/', [service, !Ref Cluster, !GetAtt ServiceWebsocket.Name]]
+      RoleARN: !GetAtt ServiceAutoscalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  ServiceScalingPolicyWebsocket:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Condition: IsWebsocket
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-asg-policy-websocket'
+      ScalingTargetId: !Ref ServiceScalingTargetWebsocket
+      PolicyType: TargetTrackingScaling
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 80
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 120
+  # Celery
+  TaskDefinitionCelery:
+    Type: 'AWS::ECS::TaskDefinition'
+    Condition: IsCelery
+    Properties:
+      Family: !Sub '${AWS::StackName}-celery-family'
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Cpu: 512
+      Memory: 512
+      ContainerDefinitions:
+        - Name: celery
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AWS::StackName}-backend:latest'
+          Essential: true
+          Environment:
+            - Name: DJANGO_SETTINGS_MODULE
+              Value: config.settings.prod
+            - Name: REDIS_HOST
+              Value: !Join ['.', [!GetAtt ServiceRegistryRedis.Name, !Ref AWS::StackName, ecs]]
+          EntryPoint: [sh, -c]
+          Command:
+            - /bin/bash -c "celery -A config.tasks worker"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TaskDefinitionLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: /ecs
+  ServiceCelery:
+    Type: 'AWS::ECS::Service'
+    Condition: IsCelery
+    DependsOn: ALBListenerRule
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: celery
+      TaskDefinition: !Ref TaskDefinitionCelery
+      SchedulingStrategy: REPLICA
+      DesiredCount: 1
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref CapacityProvider
+          Base: 1
+          Weight: 1
+      PlacementStrategies:
+        - Type: binpack
+          Field: memory
+  ServiceScalingTargetCelery:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    Condition: IsCelery
+    DependsOn: ServiceCelery
+    Properties:
+      MinCapacity: 1
+      MaxCapacity: 10
+      ResourceId: !Join ['/', [service, !Ref Cluster, !GetAtt ServiceCelery.Name]]
+      RoleARN: !GetAtt ServiceAutoscalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  ServiceScalingPolicyCelery:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Condition: IsCelery
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-asg-policy-celery'
+      ScalingTargetId: !Ref ServiceScalingTargetCelery
+      PolicyType: TargetTrackingScaling
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 80
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 120
+  # Celerybeat
+  TaskDefinitionCelerybeat:
+    Type: 'AWS::ECS::TaskDefinition'
+    Condition: IsCelerybeat
+    Properties:
+      Family: !Sub '${AWS::StackName}-celerybeat-family'
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Cpu: 256
+      Memory: 256
+      ContainerDefinitions:
+        - Name: celerybeat
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AWS::StackName}-backend:latest'
+          Essential: true
+          Environment:
+            - Name: DJANGO_SETTINGS_MODULE
+              Value: config.settings.prod
+            - Name: REDIS_HOST
+              Value: !Join ['.', [!GetAtt ServiceRegistryRedis.Name, !Ref AWS::StackName, ecs]]
+          EntryPoint: [sh, -c]
+          Command:
+            - /bin/bash -c "celery -A config.tasks beat"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TaskDefinitionLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: /ecs
+  ServiceCelerybeat:
+    Type: 'AWS::ECS::Service'
+    Condition: IsCelerybeat
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: celerybeat
+      SchedulingStrategy: REPLICA
+      DesiredCount: 1
+      LaunchType: EC2
+      TaskDefinition: !Ref TaskDefinitionCelerybeat

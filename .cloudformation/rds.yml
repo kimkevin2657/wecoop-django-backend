@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description:
+  'RDS IaC'
+
+Parameters:
+  DBName:
+    NoEcho: 'true'
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    Default: postgres
+  DBUsername:
+    NoEcho: 'true'
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    Default: postgres
+  DBPassword:
+    NoEcho: 'true'
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+
+
+Resources:
+  SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: !Sub '${AWS::StackName}-postgres-sg'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0
+  RDSCluster:
+    Type: 'AWS::RDS::DBCluster'
+    DeletionPolicy: Snapshot
+    Properties:
+      DBClusterIdentifier: !Sub '${AWS::StackName}-postgres'
+      Engine: aurora-postgresql
+      EngineVersion: 12.7
+      DBClusterParameterGroupName: default.aurora-postgresql12
+      Port: 5432
+      DatabaseName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      VpcSecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      EnableCloudwatchLogsExports:
+        - postgresql
+  RDSDBInstance:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      DBInstanceIdentifier: !Sub '${AWS::StackName}-postgres-instance'
+      Engine: aurora-postgresql
+      DBClusterIdentifier: !Ref RDSCluster
+      PubliclyAccessible: true
+      DBInstanceClass: db.t4g.medium
+  RDSAutoscalingRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ application-autoscaling.amazonaws.com ]
+            Action: [ 'sts:AssumeRole' ]
+      Path: /
+      Policies:
+        - PolicyName: rds-autoscaling
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'application-autoscaling:*'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:DeleteAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                  - 'rds:DescribeServices'
+                  - 'rds:UpdateService'
+                  - 'rds:AddTagsToResource'
+                  - 'rds:CreateDBInstance'
+                  - 'rds:DeleteDBInstance'
+                  - 'rds:DescribeDBClusters'
+                  - 'rds:DescribeDBInstances'
+                  - 'rds:ModifyDBCluster'
+                Resource: '*'
+  RDSScalingTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    Properties:
+      MinCapacity: 0
+      MaxCapacity: 15
+      ResourceId: !Join [':', [cluster, !Ref RDSCluster]]
+      RoleARN: !GetAtt RDSAutoscalingRole.Arn
+      ScalableDimension: rds:cluster:ReadReplicaCount
+      ServiceNamespace: rds
+  RDSScalingPolicy:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-asg-policy-rds'
+      ScalingTargetId: !Ref RDSScalingTarget
+      PolicyType: TargetTrackingScaling
+      ScalableDimension: rds:cluster:ReadReplicaCount
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: RDSReaderAverageCPUUtilization
+        TargetValue: 80
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 120
+  RDSSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    DependsOn: RDSCluster
+    Properties:
+      Name: !Sub '${AWS::StackName}'
+      SecretString: !Sub '{"NAME":"${DBName}","USER": "${DBUsername}","PASSWORD":"${DBPassword}","PORT":"${RDSCluster.Endpoint.Port}","WRITER_HOST":"${RDSCluster.Endpoint.Address}","READER_HOST":"${RDSCluster.ReadEndpoint.Address}"}'
+
+Outputs:
+  WriterHost:
+    Value: !GetAtt RDSCluster.Endpoint.Address
+  ReaderHost:
+    Value: !GetAtt RDSCluster.ReadEndpoint.Address
