@@ -15,10 +15,14 @@ class EventTypeMixin:
 
     async def join(self, event):
         # get peers from db
-        await self.send(text_data=json.dumps({
-            'type': event['type'],
-            'peers': [],  # send peers
-        }))
+        await self.send(
+            text_data=json.dumps(
+                {
+                    "type": event["type"],
+                    "peers": [],  # send peers
+                }
+            )
+        )
 
 
 class ConferenceConsumer(AsyncWebsocketConsumer, EventTypeMixin):
@@ -28,7 +32,7 @@ class ConferenceConsumer(AsyncWebsocketConsumer, EventTypeMixin):
     async def connect(self):
         if await self.get_conference():
             await self.channel_layer.group_add(
-                self.scope['url_route']['kwargs']['room'],
+                self.scope["url_route"]["kwargs"]["room"],
                 self.channel_name,
             )
             await self.accept()
@@ -38,21 +42,21 @@ class ConferenceConsumer(AsyncWebsocketConsumer, EventTypeMixin):
 
     async def disconnect(self, close_code):
         await self.channel_layer.group_discard(
-            self.scope['url_route']['kwargs']['room'],
+            self.scope["url_route"]["kwargs"]["room"],
             self.channel_name,
         )
         # remove peer
 
     async def receive(self, text_data=None, bytes_data=None):
         await self.channel_layer.group_send(
-            self.scope['url_route']['kwargs']['room'],
+            self.scope["url_route"]["kwargs"]["room"],
             json.loads(text_data),
         )
 
     @database_sync_to_async
     def get_conference(self):
         try:
-            conference = Conference.objects.get(room=self.scope['url_route']['kwargs']['room'])
+            conference = Conference.objects.get(room=self.scope["url_route"]["kwargs"]["room"])
         except Conference.DoesNotExist:
             conference = None
         return conference

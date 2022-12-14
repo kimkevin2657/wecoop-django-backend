@@ -1,0 +1,11 @@
+#!/bin/bash
+
+BLACK="\033[0;37m"
+GREEN="\033[1;32m"
+NOCOLOR="\033[0m"
+
+printf "${BLACK}=========== ⚫ Run Black ⚫ ============\n${NOCOLOR}"
+
+black backend -l 120
+
+echo

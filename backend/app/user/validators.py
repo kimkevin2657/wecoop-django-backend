@@ -1,7 +1,10 @@
 import re
 
-from django.contrib.auth.password_validation import UserAttributeSimilarityValidator, CommonPasswordValidator, \
-    NumericPasswordValidator
+from django.contrib.auth.password_validation import (
+    UserAttributeSimilarityValidator,
+    CommonPasswordValidator,
+    NumericPasswordValidator,
+)
 from django.core.exceptions import ValidationError
 
 
@@ -49,12 +52,12 @@ def validate_password(password):
 
 class ASCIIUsernameValidator:
     def __init__(self):
-        regex = r'^[\w]+\Z'
+        regex = r"^[\w]+\Z"
         self.p = re.compile(regex, re.ASCII)
 
     def validate(self, username):
         if not self.p.match(username):
-            msg = '영문, 숫자, 밑줄만 가능합니다.'
+            msg = "영문, 숫자, 밑줄만 가능합니다."
             raise ValidationError(msg)
 
 
@@ -65,8 +68,8 @@ class CustomLengthValidator:
 
     def validate(self, fields, user=None):
         if len(fields) < self.min_length:
-            msg = f'최소 {self.min_length} 문자를 입력해주세요.'
+            msg = f"최소 {self.min_length} 문자를 입력해주세요."
             raise ValidationError(msg)
         if len(fields) > self.max_length:
-            msg = f'최대 {self.max_length} 문자를 입력해주세요.'
+            msg = f"최대 {self.max_length} 문자를 입력해주세요."
             raise ValidationError(msg)

@@ -1,7 +1,11 @@
 from rest_framework.generics import CreateAPIView
 
-from api.v1.verifier.serializers import EmailVerifierCreateSerializer, EmailVerifierConfirmSerializer, \
-    PhoneVerifierCreateSerializer, PhoneVerifierConfirmSerializer
+from api.v1.verifier.serializers import (
+    EmailVerifierCreateSerializer,
+    EmailVerifierConfirmSerializer,
+    PhoneVerifierCreateSerializer,
+    PhoneVerifierConfirmSerializer,
+)
 
 
 class EmailVerifierCreateView(CreateAPIView):
@@ -9,6 +13,7 @@ class EmailVerifierCreateView(CreateAPIView):
     이메일 인증
     ---
     """
+
     serializer_class = EmailVerifierCreateSerializer
 
 
@@ -18,6 +23,7 @@ class EmailVerifierConfirmView(CreateAPIView):
     ---
     응답값의 token값으로 회원가입의 emailToken으로 사용
     """
+
     serializer_class = EmailVerifierConfirmSerializer
 
 
@@ -26,6 +32,7 @@ class PhoneVerifierCreateView(CreateAPIView):
     휴대폰 인증
     ---
     """
+
     serializer_class = PhoneVerifierCreateSerializer
 
 
@@ -35,5 +42,5 @@ class PhoneVerifierConfirmView(CreateAPIView):
     ---
     응답값의 token값으로 회원가입의 phoneToken으로 사용
     """
-    serializer_class = PhoneVerifierConfirmSerializer
 
+    serializer_class = PhoneVerifierConfirmSerializer

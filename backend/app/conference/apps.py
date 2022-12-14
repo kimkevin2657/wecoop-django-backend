@@ -2,4 +2,4 @@ from django.apps import AppConfig
 
 
 class ConferenceConfig(AppConfig):
-    name = 'app.conference'
+    name = "app.conference"

@@ -2,13 +2,13 @@ from collections import OrderedDict
 from urllib import parse
 
 from django.utils.encoding import force_str
-from rest_framework.pagination import CursorPagination as DefaultCursorPagination
+from rest_framework.pagination import CursorPagination as DefaultCursorPagination, PageNumberPagination
 from rest_framework.response import Response
 
 
 class CursorPagination(DefaultCursorPagination):
     page_size = 10
-    ordering = ["-created_at"]
+    ordering = ["-created"]
 
     def encode_cursor(self, cursor):
         url = super().encode_cursor(cursor)
@@ -26,3 +26,8 @@ class CursorPagination(DefaultCursorPagination):
                 ]
             )
         )
+
+
+class DefaultPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = "page_size"

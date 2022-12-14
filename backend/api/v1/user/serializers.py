@@ -1,38 +1,84 @@
-import jwt
-import requests
-from django.conf import settings
+import calendar
+from datetime import datetime
+
 from django.contrib.auth import authenticate
-from django.contrib.auth.hashers import make_password
-from django.contrib.auth.tokens import default_token_generator
-from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import transaction
-from django.template import loader
-from django.utils.encoding import force_bytes
-from django.utils.http import urlsafe_base64_encode
+from django.db.models import Sum, Q
 from drf_spectacular.utils import extend_schema_serializer
-from rest_framework import serializers
+from rest_framework import serializers, status, response
 from rest_framework.exceptions import ValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from app.logger.models import EmailLog
-from api.v1.user.examples import login_examples
+from .examples import login_examples
 from app.user.models import User, Social, SocialKindChoices, Device
-from app.user.social_adapters import SocialAdapter
-from app.user.validators import validate_password
-from app.verifier.models import EmailVerifier, PhoneVerifier
+from app.withdraw.models import Withdraw
+from app.service_payment.models import ServicePayment
+from app.service.models import Service
+from app.service_review.models import ServiceReview
+from .info_serializers import *
 
 
 class DeviceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Device
-        fields = ['uid', 'token']
+        fields = ["uid", "token"]
+
+
+class UserSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(read_only=True)
+    score = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "email",
+            "name",
+            "nickname",
+            "phone",
+            "safe_phone",
+            "is_safe_phone_open",
+            "profile_image",
+            "type",
+            "score",
+            "resident_number",
+            "account_number",
+            "bank_name",
+            "contactable_phone",
+            "contactable_start_time",
+            "contactable_end_time",
+            "description",
+            "is_email_receive",
+            "is_sms_receive",
+            "last_login",
+            "possible_withdraw_price",
+        ]
+
+    def get_score(self, obj):
+        user_services = Service.objects.select_related("user").exclude(is_deleted=True).filter(user=obj)
+        if not user_services:
+            return 0
+        avg_score = user_services.aggregate(Sum("score"))["score__sum"] / user_services.count()
+        return avg_score
+
+
+class UserSocialLoginSerializer(serializers.Serializer):
+    code = serializers.CharField(write_only=True)
+    state = serializers.CharField(write_only=True)
+    redirect_uri = serializers.URLField(write_only=True)
+    user_type = serializers.CharField(write_only=True, allow_null=True)
+
+    def validate(self, attrs):
+        if attrs["state"] not in SocialKindChoices:
+            raise ValidationError({"kind": "지원하지 않는 소셜 타입입니다."})
+
+        return attrs
 
 
 @extend_schema_serializer(examples=login_examples)
 class UserLoginSerializer(serializers.Serializer):
     email = serializers.EmailField(write_only=True)
     password = serializers.CharField(write_only=True)
-    device = DeviceSerializer(required=False, write_only=True, allow_null=True, help_text='모바일앱에서만 사용합니다.')
+    device = DeviceSerializer(required=False, write_only=True, allow_null=True, help_text="모바일앱에서만 사용합니다.")
     access = serializers.CharField(read_only=True)
     refresh = serializers.CharField(read_only=True)
 
@@ -41,17 +87,17 @@ class UserLoginSerializer(serializers.Serializer):
         return RefreshToken.for_user(user)
 
     def validate(self, attrs):
-        self.user = authenticate(request=self.context['request'], email=attrs['email'], password=attrs['password'])
+        self.user = authenticate(request=self.context["request"], email=attrs["email"], password=attrs["password"])
         if self.user:
             refresh = self.get_token(self.user)
         else:
-            raise ValidationError(['인증정보가 일치하지 않습니다.'])
+            raise ValidationError(["인증정보가 일치하지 않습니다."])
 
         data = dict()
-        data['refresh'] = str(refresh)
-        data['access'] = str(refresh.access_token)
-        if attrs.get('device'):
-            self.user.connect_device(**attrs['device'])
+        data["refresh"] = str(refresh)
+        data["access"] = str(refresh.access_token)
+        if attrs.get("device"):
+            self.user.connect_device(**attrs["device"])
 
         return data
 
@@ -60,226 +106,129 @@ class UserLoginSerializer(serializers.Serializer):
 
 
 class UserLogoutSerializer(serializers.Serializer):
-    uid = serializers.CharField(required=False, help_text='기기의 고유id')
+    uid = serializers.CharField(required=False, help_text="기기의 고유id")
 
     def create(self, validated_data):
-        user = self.context['request'].user
-        if validated_data.get('uid'):
-            user.disconnect_device(validated_data['uid'])
+        user = self.context["request"].user
+        if validated_data.get("uid"):
+            user.disconnect_device(validated_data["uid"])
 
         return {}
 
 
-class UserSocialLoginSerializer(serializers.Serializer):
-    code = serializers.CharField(write_only=True)
-    state = serializers.CharField(write_only=True)
-    redirect_uri = serializers.URLField(write_only=True)
-
-    access = serializers.CharField(read_only=True)
-    refresh = serializers.CharField(read_only=True)
-    is_register = serializers.BooleanField(read_only=True)
-
-    def validate(self, attrs):
-        if attrs['state'] not in SocialKindChoices:
-            raise ValidationError({'kind': '지원하지 않는 소셜 타입입니다.'})
-
-        attrs['social_user_id'] = self.get_social_user_id(attrs['code'], attrs['state'])
-
-        return attrs
-
-    @transaction.atomic
-    def create(self, validated_data):
-        social_user_id = validated_data['social_user_id']
-        state = validated_data['state']
-        user, created = User.objects.get_or_create(email=f'{social_user_id}@{state}.social', defaults={
-            'password': make_password(None),
-        })
-
-        if created:
-            Social.objects.create(user=user, kind=state)
-
-        refresh = RefreshToken.for_user(user)
-        return {
-            'access': refresh.access_token,
-            'refresh': refresh,
-            'is_register': user.is_register,
-        }
-
-    def get_social_user_id(self, code, state):
-        for adapter_class in SocialAdapter.__subclasses__():
-            if adapter_class.key == state:
-                return adapter_class(code, self.context['request'].META['HTTP_ORIGIN']).get_social_user_id()
-        raise ModuleNotFoundError(f'{state.capitalize()}Adapter class')
+def get_month_range():
+    today = datetime.today().date()
+    year = today.year
+    month = today.month
+    date = datetime(year=year, month=month, day=1).date()
+    month_range = calendar.monthrange(date.year, date.month)
+    last_day = today.replace(day=month_range[1])
+    return [date, last_day]
 
 
-class UserRegisterSerializer(serializers.Serializer):
-    email = serializers.CharField(write_only=True, required=False)
-    email_token = serializers.CharField(write_only=True, required=False, help_text='email verifier를 통해 얻은 token값입니다.')
-    phone = serializers.CharField(write_only=True, required=False)
-    phone_token = serializers.CharField(write_only=True, required=False, help_text='phone verifier를 통해 얻은 token값입니다.')
-    password = serializers.CharField(write_only=True, required=False)
-    password_confirm = serializers.CharField(write_only=True, required=False)
+class UserProfileSerializer(serializers.ModelSerializer):
+    education = UserEducationSerializer(read_only=True)
+    careers = UserCareerSerializer(read_only=True, many=True)
+    certificates = UserCertificateSerializer(read_only=True, many=True)
+    ceo_info = CeoInfoSerializer(read_only=True)
+    is_mine = serializers.SerializerMethodField(read_only=True)
+    email = serializers.EmailField(read_only=True)
+    score = serializers.SerializerMethodField(read_only=True)
+    score_count = serializers.SerializerMethodField(read_only=True)
+    total_estimated_price = serializers.SerializerMethodField(read_only=True)
+    withdraw_complete_price = serializers.SerializerMethodField(read_only=True)
+    payment_info = serializers.SerializerMethodField(read_only=True)
 
-    access = serializers.CharField(read_only=True)
-    refresh = serializers.CharField(read_only=True)
-
-    def get_fields(self):
-        fields = super().get_fields()
-
-        if 'email' in User.VERIFY_FIELDS:
-            fields['email_token'].required = True
-        if 'email' in User.VERIFY_FIELDS or 'email' in User.REGISTER_FIELDS:
-            fields['email'].required = True
-        if 'phone' in User.VERIFY_FIELDS:
-            fields['phone_token'].required = True
-        if 'phone' in User.VERIFY_FIELDS or 'phone' in User.REGISTER_FIELDS:
-            fields['phone'].required = True
-        if 'password' in User.REGISTER_FIELDS:
-            fields['password'].required = True
-            fields['password_confirm'].required = True
-
-        return fields
-
-    def validate(self, attrs):
-        email = attrs.get('email')
-        email_token = attrs.pop('email_token', None)
-        phone = attrs.get('phone')
-        phone_token = attrs.pop('phone_token', None)
-
-        password = attrs.get('password')
-        password_confirm = attrs.pop('password_confirm', None)
-
-        if 'email' in User.VERIFY_FIELDS:
-            # 이메일 토큰 검증
-            try:
-                self.email_verifier = EmailVerifier.objects.get(email=email, token=email_token)
-            except EmailVerifier.DoesNotExist:
-                raise ValidationError('이메일 인증을 진행해주세요.')
-        if 'email' in User.VERIFY_FIELDS or 'email' in User.REGISTER_FIELDS:
-            # 이메일 검증
-            if User.objects.filter(email=email).exists():
-                raise ValidationError({'email': ['이미 가입된 이메일입니다.']})
-
-        if 'phone' in User.VERIFY_FIELDS:
-            # 휴대폰 토큰 검증
-            try:
-                self.phone_verifier = PhoneVerifier.objects.get(phone=phone, token=phone_token)
-            except PhoneVerifier.DoesNotExist:
-                raise ValidationError('휴대폰 인증을 진행해주세요.')
-        if 'phone' in User.VERIFY_FIELDS or 'phone' in User.REGISTER_FIELDS:
-            # 휴대폰 검증
-            if User.objects.filter(phone=phone).exists():
-                raise ValidationError({'phone': ['이미 가입된 휴대폰입니다.']})
-
-        if 'password' in User.REGISTER_FIELDS:
-            errors = {}
-            # 비밀번호 검증
-            if password != password_confirm:
-                errors['password'] = ['비밀번호가 일치하지 않습니다.']
-                errors['password_confirm'] = ['비밀번호가 일치하지 않습니다.']
-            else:
-                try:
-                    validate_password(password)
-                except DjangoValidationError as error:
-                    errors['password'] = list(error)
-                    errors['password_confirm'] = list(error)
-
-            if errors:
-                raise ValidationError(errors)
-
-        return attrs
-
-    @transaction.atomic
-    def create(self, validated_data):
-        user = User.objects.create_user(
-            **validated_data,
-        )
-        if 'email' in User.VERIFY_FIELDS:
-            self.email_verifier.delete()
-        if 'phone' in User.VERIFY_FIELDS:
-            self.phone_verifier.delete()
-
-        refresh = RefreshToken.for_user(user)
-
-        return {
-            'access': refresh.access_token,
-            'refresh': refresh,
-        }
-
-
-class UserMeSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['id', 'email']
-
-
-class UserPasswordResetCreateSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-
-    def create(self, validated_data):
-        try:
-            user = User.objects.get(**validated_data)
-            self.send_password_reset_email(user)
-        except User.DoesNotExist:
-            pass
-
-        return validated_data
-
-    def send_password_reset_email(self, user):
-        request = self.context['request']
-
-        subject = '런투런 비밀번호 초기화 인증 메일'
-        context = {
-            'domain': 'learn2learn2.com',
-            'site_name': '런투런',
-            'uid': urlsafe_base64_encode(force_bytes(user.pk)),
-            'user': user,
-            'token': default_token_generator.make_token(user),
-            'protocol': 'https' if request.is_secure() else 'http',
-        }
-        body = loader.render_to_string('password_reset_email.html', context)
-        EmailLog.objects.create(
-            to=user.email,
-            title=subject,
-            body=body,
+        fields = (
+            "id",
+            "is_mine",
+            "has_career_mark",
+            "possible_withdraw_price",
+            "total_estimated_price",
+            "withdraw_complete_price",
+            "email",
+            "name",
+            "nickname",
+            "phone",
+            "safe_phone",
+            "is_safe_phone_open",
+            "profile_image",
+            "type",
+            "score",
+            "score_count",
+            "resident_number",
+            "account_number",
+            "bank_name",
+            "contactable_phone",
+            "contactable_start_time",
+            "contactable_end_time",
+            "description",
+            "is_email_receive",
+            "is_sms_receive",
+            "education",
+            "careers",
+            "certificates",
+            "ceo_info",
+            "payment_info",
         )
 
+    def get_payment_info(self, obj):
+        me = self.context["request"].user
+        if not me.is_authenticated:
+            return None
+        if me.type != "client":
+            return None
+        total_payments = ServicePayment.objects.select_related(
+            "user", "service", "service_info", "service_request"
+        ).filter(Q(user=me) & Q(status="구매확정"))
 
-class UserPasswordResetConfirmSerializer(serializers.Serializer):
-    password = serializers.CharField(write_only=True)
-    password_confirm = serializers.CharField(write_only=True)
-    token = serializers.CharField(write_only=True)
+        [month_start_date, month_end_date] = get_month_range()
 
-    def validate(self, attrs):
-        password = attrs['password']
-        password_confirm = attrs['password_confirm']
-        token = attrs['token']
-        user = self.instance
+        month_filter = Q(user=me) & Q(created__gte=month_start_date) & Q(created__lte=month_end_date)
+        month_payments = ServicePayment.objects.select_related(
+            "user", "service", "service_info", "service_request"
+        ).filter(month_filter)
 
-        if not user.is_authenticated:
-            raise ValidationError('존재하지 않는 유저입니다.')
+        return {
+            "month_payment_price": month_payments.aggregate(Sum("price"))["price__sum"] if month_payments else 0,
+            "service_use_count": month_payments.count(),
+            "total_payment_price": total_payments.aggregate(Sum("price"))["price__sum"] if total_payments else 0,
+        }
 
-        if not default_token_generator.check_token(user, token):
-            raise ValidationError('이미 비밀번호를 변경하셨습니다.')
+    def get_total_estimated_price(self, obj):
+        total_service_request = sum(
+            ServicePayment.objects.select_related("user", "service", "service_info", "service_request")
+            .filter(Q(service__user=obj) & Q(service_request__client_status="working"))
+            .values_list("price", flat=True)
+        )
+        return total_service_request if total_service_request else 0
 
-        errors = dict()
-        if password != password_confirm:
-            errors['password'] = ['비밀번호가 일치하지 않습니다.']
-            errors['password_confirm'] = ['비밀번호가 일치하지 않습니다.']
-        else:
-            try:
-                validate_password(password)
-            except DjangoValidationError as error:
-                errors['password'] = list(error)
-                errors['password_confirm'] = list(error)
-        if errors:
-            raise ValidationError(errors)
+    def get_withdraw_complete_price(self, obj):
+        total_withdraw = Withdraw.objects.select_related("user").filter(Q(user=obj) & Q(status="정산 완료"))
+        return total_withdraw.aggregate(Sum("final_price"))["final_price__sum"] if total_withdraw else 0
 
-        return attrs
+    def get_score(self, obj):
+        user_services = Service.objects.select_related("user").exclude(is_deleted=True).filter(user=obj)
+        if not user_services:
+            return 0
+        avg_score = user_services.aggregate(Sum("score"))["score__sum"] / user_services.count()
+        return avg_score
 
-    def update(self, instance, validated_data):
-        password = validated_data['password']
-        instance.set_password(password)
-        instance.save()
+    def get_score_count(self, obj):
+        return ServiceReview.objects.select_related("user").filter(service__user=obj).count()
 
-        return instance
+    def get_is_mine(self, obj):
+        me = self.context["request"].user
+        if not me.is_authenticated:
+            return False
+        return me.id == obj.id
+
+
+class ServiceUserSerializer(serializers.ModelSerializer):
+    careers = UserCareerSerializer(read_only=True, many=True)
+
+    class Meta:
+        model = User
+        fields = ("careers",)

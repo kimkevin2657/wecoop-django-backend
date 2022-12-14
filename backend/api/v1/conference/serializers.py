@@ -10,10 +10,10 @@ class ConferenceCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Conference
-        fields = ['room']
+        fields = ["room"]
 
     def validate(self, attrs):
-        attrs['room'] = self._get_random_room()
+        attrs["room"] = self._get_random_room()
         return attrs
 
     def _get_random_room(self):

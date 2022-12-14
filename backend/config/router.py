@@ -7,13 +7,13 @@ class Router:
     default_app_labels: set = {}
 
     def db_for_read(self, model, **hints):
-        if 'reader' in self.databases:
-            return 'reader'
-        return 'default'
+        if "reader" in self.databases:
+            return "reader"
+        return "default"
 
     @staticmethod
     def db_for_write(model, **hints):
-        return 'default'
+        return "default"
 
     @staticmethod
     def allow_relation(obj1, obj2, **hints):
@@ -30,5 +30,5 @@ class Router:
     @staticmethod
     def _check_in_atomic_block():
         transaction.get_autocommit()
-        if transaction.get_connection('default').in_atomic_block:
+        if transaction.get_connection("default").in_atomic_block:
             return True

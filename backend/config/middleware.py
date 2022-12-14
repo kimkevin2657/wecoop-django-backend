@@ -3,7 +3,7 @@ import logging
 import jwt
 from django.conf import settings
 
-logger = logging.getLogger('request')
+logger = logging.getLogger("request")
 
 
 class RequestLogMiddleware:
@@ -17,7 +17,7 @@ class RequestLogMiddleware:
         response = self.get_response(request)
 
         # after
-        if request.path != '/health':
+        if request.path != "/health":
             self._get_logger(response.status_code)(self._get_log_data(request, request_body, response))
 
         return response
@@ -32,7 +32,7 @@ class RequestLogMiddleware:
             return logger.error
 
     def _get_log_data(self, request, request_body, response):
-        return 'HTTP {method} {status_code} {path} [{remote}] [{user}] {body}'.format(
+        return "HTTP {method} {status_code} {path} [{remote}] [{user}] {body}".format(
             method=request.method,
             status_code=response.status_code,
             path=request.get_full_path(),
@@ -47,12 +47,12 @@ class RequestLogMiddleware:
 
     @staticmethod
     def _restore_request_body(content_type, request_body):
-        if content_type == 'multipart/form-data':
-            return ''
+        if content_type == "multipart/form-data":
+            return ""
         if type(request_body) is bytes:
             request_body = request_body.decode()
         if request_body:
-            request_body = f'\n{request_body}'
+            request_body = f"\n{request_body}"
         return request_body
 
 
@@ -64,13 +64,13 @@ class DoobucMiddleWare:
         # before
         request.doobuc_user = {}
 
-        authorization = request.headers.get('Authorization')
+        authorization = request.headers.get("Authorization")
         if authorization:
             print(type(request))
             request.jwt_user = jwt.decode(
                 authorization,
                 secrets=settings.DOOBUC_SECRET,
-                algorithms=['HS256'],
+                algorithms=["HS256"],
             )
 
         # view

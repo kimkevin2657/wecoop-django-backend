@@ -1,13 +1,9 @@
-from rest_framework.permissions import BasePermission
-
-from app.chat.models import Chat
+from rest_framework import permissions
 
 
-class IsChatOwner(BasePermission):
+class ChatPermission(permissions.BasePermission):
     def has_permission(self, request, view):
-        pk = request.parser_context['kwargs']['pk']
-        try:
-            chat = Chat.objects.get(pk=pk)
-            return request.user in chat.user_set.all()
-        except Chat.DoesNotExist:
-            return False
+        return super().has_permission(request, view)
+
+    def has_object_permission(self, request, view, obj):
+        return super().has_object_permission(request, view, obj)
